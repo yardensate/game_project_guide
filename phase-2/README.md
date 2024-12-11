@@ -1,232 +1,185 @@
-# Phase 2: Session Management - Detailed Implementation Plan
+# Phase 2: Session Management - AWS Implementation Plan
 
-## 1. Redis Cluster Implementation
-- Deploy Redis to Kubernetes:
-  ```yaml
-  # Redis deployment with StatefulSet
-  # Redis service
-  # Redis config with:
-    - Memory settings
-    - Persistence config
-    - Basic security
-  ```
-- Redis data structures:
-  ```python
-  # Active sessions: Hash
-  sessions:{session_id} = {
-      'player_id': str,
-      'status': str,
-      'rating': int,
-      'timestamp': str
-  }
-  
-  # Match queues: Sorted Set
-  queue:matchmaking = {
-      player_id: rating_score
-  }
-  
-  # Player ratings: Hash
-  player:{player_id}:stats = {
-      'current_rating': int,
-      'games_played': int,
-      'win_rate': float
-  }
-  ```
+## 1. Amazon ElastiCache (Redis) Implementation
+```hcl
+# Terraform configuration for ElastiCache
+resource "aws_elasticache_cluster" "game_cache" {
+  cluster_id           = "game-session-cache"
+  engine              = "redis"
+  node_type           = "cache.t3.micro"
+  num_cache_nodes     = 1
+  port                = 6379
+  parameter_group_name = aws_elasticache_parameter_group.game_cache_params.name
+  security_group_ids  = [aws_security_group.redis_sg.id]
+}
 
-## 2. Gaming Features Implementation
-
-### Session Management:
-```python
-# New Endpoints:
-POST /api/v1/sessions/create
-    - Create new game session
-    - Associate players
-    - Set initial state
-
-GET /api/v1/sessions/{session_id}/state
-    - Get current session state
-    - Include player info
-    - Include timestamps
-
-PUT /api/v1/sessions/{session_id}/update
-    - Update session state
-    - Handle state transitions
-
-DELETE /api/v1/sessions/{session_id}
-    - Clean up session data
-    - Update player stats
-```
-
-### Player Authentication:
-```python
-# New Endpoints:
-POST /api/v1/auth/register
-    - Create new player account
-    - Initial rating assignment
-
-POST /api/v1/auth/login
-    - Player authentication
-    - Token generation
-
-GET /api/v1/auth/profile
-    - Get player profile
-    - Include stats/history
-```
-
-### Basic Rating System:
-```python
-# Rating calculation:
-class RatingSystem:
-    def calculate_rating_change(
-        player_rating: int,
-        opponent_rating: int,
-        outcome: float
-    ) -> int:
-        # Basic ELO implementation
-        # Outcome: 1.0 win, 0.5 draw, 0.0 loss
-        
-# New Endpoints:
-GET /api/v1/players/{player_id}/rating
-    - Get current rating
-    - Rating history
-
-POST /api/v1/matches/result
-    - Submit match result
-    - Update ratings
-```
-
-### Match Queue System:
-```python
-# Queue management:
-class MatchQueue:
-    def add_to_queue(player_id: str, rating: int)
-    def find_match(player_id: str) -> Optional[str]
-    def remove_from_queue(player_id: str)
-    
-# New Endpoints:
-POST /api/v1/queue/join
-    - Add player to queue
-    - Consider rating
-
-DELETE /api/v1/queue/leave
-    - Remove from queue
-
-GET /api/v1/queue/status
-    - Queue position
-    - Estimated wait time
-```
-
-## 3. Enhanced Logging System
-
-### Structured Logging:
-```python
-# Log format:
-{
-    "timestamp": "ISO-8601",
-    "level": "INFO|ERROR|DEBUG",
-    "service": "api|queue|auth",
-    "event": "event_name",
-    "player_id": "optional_player_id",
-    "session_id": "optional_session_id",
-    "details": {},
-    "trace_id": "uuid"
+# Redis data structures remain the same:
+sessions:{session_id} = {
+    'player_id': str,
+    'status': str,
+    'rating': int,
+    'timestamp': str
 }
 ```
 
-### Debug Information:
-- Queue performance metrics
-- Matchmaking decisions
-- Rating calculations
-- Session state changes
+## 2. Gaming Features Implementation
+
+### Session Management with AWS Integration:
+```python
+from aws_xray_sdk.core import xray_recorder
+
+@xray_recorder.capture('session_management')
+class AWSSessionManager:
+    def __init__(self):
+        self.elasticache = boto3.client('elasticache')
+        self.docdb = boto3.client('docdb')
+        
+    @xray_recorder.capture('create_session')
+    async def create_session(self, session_data: dict):
+        # Create session in ElastiCache
+        # Store persistent data in DocumentDB
+```
+
+### Player Authentication using Cognito:
+```python
+from aws_cognito_client import CognitoClient
+
+class AuthService:
+    def __init__(self):
+        self.cognito = CognitoClient(
+            user_pool_id=settings.COGNITO_USER_POOL_ID,
+            client_id=settings.COGNITO_CLIENT_ID
+        )
+    
+    async def register_player(self, username: str, password: str):
+        return await self.cognito.sign_up(username, password)
+
+    async def authenticate_player(self, username: str, password: str):
+        return await self.cognito.initiate_auth(username, password)
+```
+
+### Rating System with AWS Integration:
+```python
+class AWSRatingSystem:
+    def __init__(self):
+        self.elasticache = boto3.client('elasticache')
+        self.cloudwatch = boto3.client('cloudwatch')
+        
+    async def update_rating(self, player_id: str, new_rating: int):
+        # Update rating in ElastiCache
+        # Send metric to CloudWatch
+        self.cloudwatch.put_metric_data(
+            Namespace='GameMetrics',
+            MetricData=[{
+                'MetricName': 'PlayerRating',
+                'Value': new_rating,
+                'Unit': 'None',
+                'Dimensions': [{'Name': 'PlayerId', 'Value': player_id}]
+            }]
+        )
+```
+
+## 3. Enhanced AWS Monitoring
+
+### CloudWatch Integration:
+```python
+# Metrics configuration
+cloudwatch_metrics = {
+    'Dimensions': [
+        {'Name': 'Environment', 'Value': environment},
+        {'Name': 'Service', 'Value': service_name}
+    ],
+    'Metrics': [
+        {'Name': 'SessionCreationLatency'},
+        {'Name': 'QueueLength'},
+        {'Name': 'MatchmakingTime'}
+    ]
+}
+```
+
+### X-Ray Tracing:
+```python
+from aws_xray_sdk.core import xray_recorder
+from aws_xray_sdk.ext.fastapi.middleware import XRayMiddleware
+
+app.add_middleware(XRayMiddleware, recorder=xray_recorder)
+```
 
 ## 4. Data Layer Implementation
 
-### Redis Data:
-- Active session management
-- Queue management
-- Real-time player states
-- Rating caching
+### ElastiCache Configuration:
+```hcl
+resource "aws_elasticache_parameter_group" "game_cache_params" {
+  family = "redis6.x"
+  
+  parameter {
+    name  = "maxmemory-policy"
+    value = "volatile-lru"
+  }
+}
+```
 
-### MongoDB Collections:
+### DocumentDB Collections:
 ```javascript
-// Players collection
+// Players collection in DocumentDB
 {
     _id: ObjectId,
-    username: String,
-    auth_data: {
-        password_hash: String,
-        last_login: DateTime
-    },
+    cognito_id: String,
     profile: {
         created_at: DateTime,
         games_played: Number,
         current_rating: Number
-    },
-    rating_history: [{
-        timestamp: DateTime,
-        rating: Number,
-        change: Number
-    }]
-}
-
-// Sessions collection
-{
-    _id: ObjectId,
-    created_at: DateTime,
-    players: [{
-        player_id: ObjectId,
-        rating: Number
-    }],
-    status: String,
-    history: [{
-        timestamp: DateTime,
-        event: String,
-        details: Object
-    }]
+    }
+    // ... rest remains same
 }
 ```
 
 ## 5. Updated Directory Structure:
 ```
 game-session-manager/
+├── terraform/
+│   ├── elasticache.tf
+│   ├── cognito.tf
+│   └── monitoring.tf
 ├── src/
 │   ├── api/
 │   │   ├── routes/
-│   │   │   ├── auth.py
-│   │   │   ├── sessions.py
-│   │   │   ├── queue.py
-│   │   │   └── ratings.py
 │   │   └── models/
 │   ├── services/
-│   │   ├── auth_service.py
-│   │   ├── queue_service.py
-│   │   ├── rating_service.py
-│   │   └── session_service.py
+│   │   ├── aws/
+│   │   │   ├── cognito.py
+│   │   │   ├── elasticache.py
+│   │   │   └── cloudwatch.py
+│   │   └── game/
 │   └── utils/
-│       ├── redis_client.py
-│       └── logging.py
 ├── deployment/
-│   └── kubernetes/
-│       ├── redis.yaml
-│       └── updated-services.yaml
+│   └── aws/
 └── tests/
-    └── phase2/
-        ├── test_auth.py
-        ├── test_queue.py
-        └── test_ratings.py
 ```
 
-## Success Criteria for Phase 2:
-1. Redis cluster operational
-2. All new endpoints responding correctly
-3. Session management working:
-   - Creation
-   - State updates
-   - Cleanup
-4. Player authentication functional
-5. Basic matchmaking working
-6. Rating system operational
-7. Logs showing clear system activity
-8. Data persistence confirmed in both Redis and MongoDB
+## 6. Success Criteria for Phase 2:
+1. ElastiCache cluster operational
+2. Cognito user pool managing players
+3. Session management working with AWS services
+4. CloudWatch showing gaming metrics
+5. X-Ray traces providing insights
+6. All endpoints integrated with AWS services
+7. Data persistence working in ElastiCache and DocumentDB
+8. AWS security properly configured
 
-Ready to start any specific component of Phase 2?
+## 7. CloudWatch Alarms:
+```hcl
+resource "aws_cloudwatch_metric_alarm" "session_latency" {
+  alarm_name          = "session-latency"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name        = "SessionCreationLatency"
+  namespace          = "GameMetrics"
+  period             = "60"
+  statistic          = "Average"
+  threshold          = "1000"
+  alarm_description  = "Session creation taking too long"
+  alarm_actions      = [aws_sns_topic.alerts.arn]
+}
+```
+

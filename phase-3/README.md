@@ -1,19 +1,20 @@
-# Phase 3: Real-time Features - Detailed Implementation Plan
+# Phase 3: Real-time Features - AWS Implementation Plan
 
-## 1. WebSocket Server Implementation
+## 1. AWS API Gateway WebSocket Implementation
 ```python
-# WebSocket connection handling
-@app.websocket("/ws/{player_id}")
-async def websocket_endpoint(websocket: WebSocket, player_id: str):
-    await manager.connect(websocket, player_id)
-    try:
-        while True:
-            data = await websocket.receive_json()
-            await handle_websocket_message(data, player_id)
-    except WebSocketDisconnect:
-        await manager.disconnect(player_id)
+# AWS Lambda function for WebSocket handling
+def lambda_handler(event, context):
+    connection_id = event['requestContext']['connectionId']
+    route_key = event['requestContext']['routeKey']
+    
+    if route_key == '$connect':
+        return handle_connect(connection_id)
+    elif route_key == '$disconnect':
+        return handle_disconnect(connection_id)
+    
+    return handle_message(event['body'], connection_id)
 
-# Message Types:
+# Message Types remain same:
 {
     "type": "match_found",
     "data": {
@@ -22,177 +23,185 @@ async def websocket_endpoint(websocket: WebSocket, player_id: str):
         "timestamp": str
     }
 }
+```
 
-{
-    "type": "queue_update",
-    "data": {
-        "position": int,
-        "estimated_wait": int
-    }
+### WebSocket Infrastructure:
+```hcl
+# API Gateway WebSocket API
+resource "aws_apigatewayv2_api" "websocket" {
+  name                       = "game-session-websocket"
+  protocol_type             = "WEBSOCKET"
+  route_selection_expression = "$request.body.action"
 }
 
-{
-    "type": "game_state_update",
-    "data": {
-        "session_id": str,
-        "state": str,
-        "timestamp": str
-    }
+# Lambda Integration
+resource "aws_apigatewayv2_integration" "websocket_lambda" {
+  api_id           = aws_apigatewayv2_api.websocket.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.websocket_handler.invoke_arn
 }
 ```
 
-## 2. Advanced Queue System
+## 2. Advanced Queue System with AWS Services
 
 ### Enhanced Matchmaking Service:
 ```python
-class AdvancedMatchmaker:
-    def find_match(self, player: Player) -> Optional[Match]:
-        # Consider:
-        # - Player rating
-        # - Wait time
-        # - Region/latency
-        # - Recent opponents
+class AWSMatchmaker:
+    def __init__(self):
+        self.sqs = boto3.client('sqs')
+        self.elasticache = boto3.client('elasticache')
         
-    def process_queue(self):
-        # Batch processing
-        # Priority handling
-        # Fairness ensuring
-
-# New Endpoints:
-POST /api/v1/matchmaking/preferences
-    - Set matchmaking preferences
-    - Region selection
-    - Game mode selection
-
-GET /api/v1/matchmaking/statistics
-    - Current queue length
-    - Average wait times
-    - Match distribution data
+    async def process_queue(self):
+        # Use SQS for queue management
+        messages = self.sqs.receive_message(
+            QueueUrl=QUEUE_URL,
+            MaxNumberOfMessages=10
+        )
+        
+        # Process matches using ElastiCache for state
 ```
 
-## 3. Real-time Data Management with Redis Pub/Sub
-
-### Channel Structure:
-```python
-# Redis Pub/Sub channels:
-f"player:{player_id}:updates"  # Player-specific updates
-f"match:{match_id}:events"     # Match events
-"queue:status"                 # Queue broadcasts
-"system:announcements"         # System-wide messages
-
-# Example message structure:
-{
-    "channel": "player:123:updates",
-    "message": {
-        "type": "match_ready",
-        "data": {...},
-        "timestamp": "2024-11-29T12:00:00Z"
-    }
+### SQS Queue Setup:
+```hcl
+resource "aws_sqs_queue" "matchmaking" {
+  name                      = "game-matchmaking-queue"
+  visibility_timeout_seconds = 30
+  message_retention_seconds = 86400
+  
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.matchmaking_dlq.arn
+    maxReceiveCount     = 3
+  })
 }
 ```
 
-### Real-time Event Handlers:
+## 3. Real-time Data Management with ElastiCache and SNS
+
+### AWS SNS Topics:
+```hcl
+resource "aws_sns_topic" "game_events" {
+  name = "game-events"
+}
+
+resource "aws_sns_topic_subscription" "lambda" {
+  topic_arn = aws_sns_topic.game_events.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.event_handler.arn
+}
+```
+
+### Event Handler Lambda:
 ```python
-class EventHandler:
+class AWSEventHandler:
+    def __init__(self):
+        self.sns = boto3.client('sns')
+        self.api_gateway = boto3.client('apigatewaymanagementapi')
+        
     async def handle_match_ready(self, player_id: str, match_data: dict):
-        # Notify players
-        # Update states
-        # Start session timer
-        
-    async def handle_queue_update(self, queue_data: dict):
-        # Broadcast queue status
-        # Update wait times
-        
-    async def handle_session_update(self, session_id: str, update: dict):
-        # Process state change
-        # Notify affected players
+        # Publish to SNS topic
+        self.sns.publish(
+            TopicArn=GAME_EVENTS_TOPIC,
+            Message=json.dumps({
+                'type': 'match_ready',
+                'player_id': player_id,
+                'data': match_data
+            })
+        )
 ```
 
-## 4. Enhanced Monitoring System
+## 4. Enhanced AWS Monitoring
 
-### New Prometheus Metrics:
+### CloudWatch Metrics:
 ```python
-# Custom metrics
-websocket_connections = Gauge(
-    'game_websocket_connections',
-    'Number of active WebSocket connections'
-)
-
-queue_waiting_time = Histogram(
-    'game_queue_waiting_seconds',
-    'Time players spend in queue'
-)
-
-matchmaking_success_rate = Counter(
-    'game_matchmaking_success_total',
-    'Number of successful matches made'
-)
+class GameMetrics:
+    def __init__(self):
+        self.cloudwatch = boto3.client('cloudwatch')
+        
+    def track_connection(self, connection_id: str):
+        self.cloudwatch.put_metric_data(
+            Namespace='GameMetrics',
+            MetricData=[{
+                'MetricName': 'ActiveConnections',
+                'Value': 1,
+                'Unit': 'Count'
+            }]
+        )
 ```
 
-### Grafana Dashboards:
-1. Real-time Overview:
-   - Active connections
-   - Message rates
-   - Queue lengths
-   - Match creation rate
-
-2. Performance Dashboard:
-   - WebSocket latency
-   - Message processing time
-   - Queue processing metrics
-   - Redis pub/sub performance
+### CloudWatch Dashboard:
+```hcl
+resource "aws_cloudwatch_dashboard" "realtime" {
+  dashboard_name = "game-realtime-metrics"
+  
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["GameMetrics", "WebSocketLatency"],
+            ["GameMetrics", "MatchmakingTime"],
+            ["GameMetrics", "QueueLength"]
+          ]
+          period = 60
+        }
+      }
+    ]
+  })
+}
+```
 
 ## 5. Updated Directory Structure:
 ```
 game-session-manager/
+├── terraform/
+│   ├── websocket.tf
+│   ├── sqs.tf
+│   ├── sns.tf
+│   └── lambda.tf
 ├── src/
-│   ├── api/
-│   │   └── websocket/
-│   │       ├── manager.py
-│   │       ├── handlers.py
-│   │       └── types.py
+│   ├── lambda/
+│   │   ├── websocket/
+│   │   └── events/
 │   ├── services/
 │   │   ├── matchmaking/
-│   │   │   ├── matcher.py
-│   │   │   └── queue.py
 │   │   └── realtime/
-│   │       ├── events.py
-│   │       └── pubsub.py
 │   └── monitoring/
-│       ├── metrics.py
-│       └── grafana/
-├── deployment/
-│   └── kubernetes/
-│       ├── websocket.yaml
-│       └── scaling.yaml
 └── tests/
-    └── phase3/
-        ├── test_websocket.py
-        ├── test_matchmaking.py
-        └── test_realtime.py
 ```
 
 ## 6. Performance Considerations
-- WebSocket connection pooling
-- Redis pub/sub optimization
-- Queue processing batch size
-- Message rate limiting
-- Connection backoff strategy
+- Lambda concurrency limits
+- API Gateway WebSocket connection limits
+- SQS batch processing
+- SNS message filtering
+- ElastiCache clustering
 
 ## 7. Success Criteria for Phase 3:
-1. WebSocket server handling connections reliably
-2. Real-time updates working:
-   - Match notifications
-   - Queue position updates
-   - Game state changes
-3. Advanced matchmaking functioning:
-   - Fair matches being made
-   - Reasonable queue times
-   - Proper skill consideration
-4. Monitoring showing:
-   - Healthy connection counts
-   - Good message delivery rates
-   - Acceptable latencies
-5. System handling disconnects gracefully
-6. All real-time features have proper error handling
+1. API Gateway WebSocket endpoints operational
+2. Lambda functions handling real-time events
+3. SQS queues processing matchmaking efficiently
+4. SNS topics delivering notifications
+5. CloudWatch metrics showing:
+   - WebSocket connection stats
+   - Queue performance
+   - Event processing latency
+6. System scalability under load
+7. Error handling and dead letter queues working
 
+## 8. AWS-Specific Monitoring:
+```hcl
+resource "aws_cloudwatch_metric_alarm" "websocket_errors" {
+  alarm_name          = "websocket-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "WebSocketErrors"
+  namespace           = "GameMetrics"
+  period             = "60"
+  statistic          = "Sum"
+  threshold          = "5"
+  alarm_actions      = [aws_sns_topic.alerts.arn]
+}
+```
+
+Would you like me to detail any specific AWS component further or show more service integrations?
